@@ -19,9 +19,10 @@ package com.aresstack.wintrust;
  *       process.</li>
  *   <li>{@code useWindowsCaStores} &mdash; the Windows Root <em>and</em> Intermediate CA stores in
  *       both the {@code LocalMachine} and {@code CurrentUser} scopes, exported through an inline
- *       {@code powershell.exe -Command}. {@code SunMSCAPI} does not expose the intermediate store;
- *       this is what lets PKIX build a chain when a TLS-intercepting proxy omits the intermediate
- *       certificate from the handshake.</li>
+ *       {@code powershell.exe -Command}. The Root stores supply trust anchors; the Intermediate store
+ *       (which {@code SunMSCAPI} does not expose) supplies chain-building material only. This is what
+ *       lets PKIX build a chain when a TLS-intercepting proxy omits the intermediate certificate from
+ *       the handshake, without ever trusting an intermediate whose root is not trusted.</li>
  * </ul>
  *
  * <p>Instances are immutable. Use {@link #defaults()} for all three sources, or

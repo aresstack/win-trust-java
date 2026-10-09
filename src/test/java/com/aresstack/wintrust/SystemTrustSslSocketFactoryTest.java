@@ -117,7 +117,9 @@ class SystemTrustSslSocketFactoryTest {
         assertFalse(result.isWindowsCaStoresTrusted());
         assertEquals(0, result.getWindowsExportedCertificateCount());
         assertFalse(result.isFallbackToJvmDefault(), "the JVM source alone still yields a combined context");
-        assertTrue(result.getDiagnostics().contains("Windows Root/Intermediate CA stores contributed no certificates."),
+        assertEquals(0, result.getWindowsRootAnchorCount());
+        assertEquals(0, result.getWindowsIntermediateCount());
+        assertTrue(result.getDiagnostics().contains("Windows Root/Intermediate CA stores contributed no trust anchors."),
                 result.getDiagnostics().toString());
         assertFalse(containsPrefix(result, "Windows Root/Intermediate CA export:"),
                 "off Windows the export is skipped silently, there is no error");

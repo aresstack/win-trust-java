@@ -1,14 +1,22 @@
 package com.aresstack.wintrust;
 
+import javax.net.ssl.CertPathTrustManagerParameters;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
+import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertStore;
+import java.security.cert.CollectionCertStoreParameters;
+import java.security.cert.PKIXBuilderParameters;
+import java.security.cert.X509CertSelector;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -25,6 +33,12 @@ import java.util.Map;
  * the JVM's bundled {@code cacerts}. Without merging the Windows stores, every HTTPS request fails
  * during the TLS handshake with {@code PKIX path building failed ... unable to find valid
  * certification path to requested target}, even though proxy discovery succeeds.</p>
+ *
+ * <p>Trust is never widened beyond what Windows itself trusts: only the Windows <em>Root</em> stores
+ * (and {@code Windows-ROOT}) contribute trust anchors. Certificates from the Windows
+ * <em>Intermediate</em> CA stores are handed to the PKIX path builder as chain-building material
+ * only, so a server chain that omits its intermediate can still be completed, but an intermediate
+ * whose root is not trusted never becomes trusted by itself.</p>
  *
  * <p>This factory does not silently swallow failures: the {@link Result} records which trust sources
  * were actually loaded, how many certificates the Windows export produced, and any diagnostic
@@ -58,20 +72,23 @@ public final class SystemTrustSslSocketFactory {
         private final boolean jvmDefaultTrusted;
         private final boolean windowsRootTrusted;
         private final boolean windowsCaStoresTrusted;
-        private final int windowsExportedCertificateCount;
+        private final int windowsRootAnchorCount;
+        private final int windowsIntermediateCount;
         private final boolean fallbackToJvmDefault;
         private final List<String> diagnostics;
 
         Result(SSLSocketFactory socketFactory, SSLContext sslContext, X509TrustManager trustManager,
                boolean jvmDefaultTrusted, boolean windowsRootTrusted, boolean windowsCaStoresTrusted,
-               int windowsExportedCertificateCount, boolean fallbackToJvmDefault, List<String> diagnostics) {
+               int windowsRootAnchorCount, int windowsIntermediateCount, boolean fallbackToJvmDefault,
+               List<String> diagnostics) {
             this.socketFactory = socketFactory;
             this.sslContext = sslContext;
             this.trustManager = trustManager;
             this.jvmDefaultTrusted = jvmDefaultTrusted;
             this.windowsRootTrusted = windowsRootTrusted;
             this.windowsCaStoresTrusted = windowsCaStoresTrusted;
-            this.windowsExportedCertificateCount = windowsExportedCertificateCount;
+            this.windowsRootAnchorCount = windowsRootAnchorCount;
+            this.windowsIntermediateCount = windowsIntermediateCount;
             this.fallbackToJvmDefault = fallbackToJvmDefault;
             this.diagnostics = Collections.unmodifiableList(new ArrayList<String>(diagnostics));
         }
@@ -113,11 +130,26 @@ public final class SystemTrustSslSocketFactory {
         }
 
         /**
-         * @return how many distinct certificates the Windows Root/Intermediate export produced
+         * @return how many distinct certificates the Windows Root/Intermediate export produced in total
          *         ({@code 0} when that source was disabled, failed, or the platform is not Windows)
          */
         public int getWindowsExportedCertificateCount() {
-            return windowsExportedCertificateCount;
+            return windowsRootAnchorCount + windowsIntermediateCount;
+        }
+
+        /**
+         * @return how many distinct Windows Root-store certificates serve as trust anchors
+         */
+        public int getWindowsRootAnchorCount() {
+            return windowsRootAnchorCount;
+        }
+
+        /**
+         * @return how many distinct Windows Intermediate-store certificates are available to the PKIX
+         *         path builder (chain-building material only, never trust anchors)
+         */
+        public int getWindowsIntermediateCount() {
+            return windowsIntermediateCount;
         }
 
         /**
@@ -140,7 +172,8 @@ public final class SystemTrustSslSocketFactory {
             return "SystemTrustSslSocketFactory.Result{jvmDefaultTrusted=" + jvmDefaultTrusted
                     + ", windowsRootTrusted=" + windowsRootTrusted
                     + ", windowsCaStoresTrusted=" + windowsCaStoresTrusted
-                    + ", windowsExportedCertificateCount=" + windowsExportedCertificateCount
+                    + ", windowsRootAnchorCount=" + windowsRootAnchorCount
+                    + ", windowsIntermediateCount=" + windowsIntermediateCount
                     + ", fallbackToJvmDefault=" + fallbackToJvmDefault
                     + ", diagnostics=" + diagnostics + '}';
         }
@@ -189,7 +222,8 @@ public final class SystemTrustSslSocketFactory {
         boolean jvmDefault = false;
         boolean windowsRoot = false;
         boolean windowsCa = false;
-        int exportedCount = 0;
+        int rootAnchorCount = 0;
+        int intermediateCount = 0;
 
         if (configuration.isUseJvmDefault()) {
             if (addTrustManager(delegates, null, diagnostics, "JVM default truststore")) {
@@ -206,11 +240,12 @@ public final class SystemTrustSslSocketFactory {
 
         if (configuration.isUseWindowsCaStores()) {
             WindowsCertificateStores.Result stores = WindowsCertificateStores.loadRootAndIntermediateCertificates();
-            exportedCount = stores.getCertificates().size();
+            rootAnchorCount = stores.getRootCertificates().size();
+            intermediateCount = stores.getIntermediateCertificates().size();
             if (stores.getError() != null) {
                 diagnostics.add("Windows Root/Intermediate CA export: " + stores.getError());
             }
-            windowsCa = addWindowsCaTrustManager(delegates, stores.getCertificates(), diagnostics);
+            windowsCa = addWindowsCaTrustManager(delegates, stores, diagnostics);
         }
 
         if (!configuration.isAnySourceEnabled()) {
@@ -219,7 +254,7 @@ public final class SystemTrustSslSocketFactory {
 
         if (delegates.isEmpty()) {
             diagnostics.add("No trust source produced a trust manager; using the JVM default SSL socket factory.");
-            return fallback(jvmDefault, windowsRoot, windowsCa, exportedCount, diagnostics);
+            return fallback(jvmDefault, windowsRoot, windowsCa, rootAnchorCount, intermediateCount, diagnostics);
         }
 
         X509TrustManager composite = new CompositeX509TrustManager(delegates);
@@ -227,11 +262,11 @@ public final class SystemTrustSslSocketFactory {
             SSLContext context = SSLContext.getInstance("TLS");
             context.init(null, new TrustManager[]{composite}, null);
             return new Result(context.getSocketFactory(), context, composite,
-                    jvmDefault, windowsRoot, windowsCa, exportedCount, false, diagnostics);
+                    jvmDefault, windowsRoot, windowsCa, rootAnchorCount, intermediateCount, false, diagnostics);
         } catch (GeneralSecurityException ex) {
             diagnostics.add("Could not initialise the combined SSL context (" + messageOf(ex)
                     + "); using the JVM default SSL socket factory.");
-            return fallback(jvmDefault, windowsRoot, windowsCa, exportedCount, diagnostics);
+            return fallback(jvmDefault, windowsRoot, windowsCa, rootAnchorCount, intermediateCount, diagnostics);
         }
     }
 
@@ -246,7 +281,7 @@ public final class SystemTrustSslSocketFactory {
     }
 
     private static Result fallback(boolean jvmDefault, boolean windowsRoot, boolean windowsCa,
-                                   int exportedCount, List<String> diagnostics) {
+                                   int rootAnchorCount, int intermediateCount, List<String> diagnostics) {
         SSLContext context = null;
         try {
             context = SSLContext.getDefault();
@@ -256,7 +291,7 @@ public final class SystemTrustSslSocketFactory {
         SSLSocketFactory factory = context != null
                 ? context.getSocketFactory() : (SSLSocketFactory) SSLSocketFactory.getDefault();
         return new Result(factory, context, defaultTrustManagerOrNull(),
-                jvmDefault, windowsRoot, windowsCa, exportedCount, true, diagnostics);
+                jvmDefault, windowsRoot, windowsCa, rootAnchorCount, intermediateCount, true, diagnostics);
     }
 
     private static X509TrustManager defaultTrustManagerOrNull() {
@@ -284,34 +319,70 @@ public final class SystemTrustSslSocketFactory {
     }
 
     /**
-     * Adds the certificates from the Windows Root <em>and</em> Intermediate Certification Authorities
-     * stores (which {@code SunMSCAPI}'s {@code Windows-ROOT} keystore does not expose) as trust
-     * anchors. Making the corporate intermediate CA an anchor lets PKIX build the chain even when a
-     * TLS-intercepting proxy omits the intermediate from the handshake, which is the case
-     * {@code Windows-ROOT} alone cannot cover.
+     * Adds a PKIX trust manager whose trust anchors are the certificates of the Windows <em>Root</em>
+     * stores and whose path builder may use the certificates of the Windows <em>Intermediate</em> CA
+     * stores (which {@code SunMSCAPI}'s {@code Windows-ROOT} keystore does not expose) to complete a
+     * chain. This lets PKIX validate a TLS-intercepting proxy that omits its intermediate from the
+     * handshake, which is the case {@code Windows-ROOT} alone cannot cover, while an intermediate whose
+     * root is not trusted stays untrusted: the Intermediate store is a cache Windows fills from every
+     * chain it sees, so its entries are never promoted to anchors.
      */
     private static boolean addWindowsCaTrustManager(List<X509TrustManager> delegates,
-                                                    List<X509Certificate> certificates, List<String> diagnostics) {
-        if (certificates.isEmpty()) {
-            diagnostics.add("Windows Root/Intermediate CA stores contributed no certificates.");
+                                                    WindowsCertificateStores.Result stores, List<String> diagnostics) {
+        List<X509Certificate> anchors = stores.getRootCertificates();
+        List<X509Certificate> intermediates = stores.getIntermediateCertificates();
+        if (anchors.isEmpty()) {
+            diagnostics.add("Windows Root/Intermediate CA stores contributed no trust anchors"
+                    + (intermediates.isEmpty() ? "." : "; " + intermediates.size()
+                    + " intermediate certificate(s) ignored because there is no root to anchor them."));
             return false;
         }
         try {
-            KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
-            keyStore.load(null, null);
-            for (int i = 0; i < certificates.size(); i++) {
-                keyStore.setCertificateEntry("win-trust-ca-" + i, certificates.get(i));
-            }
-            if (addTrustManager(delegates, keyStore, diagnostics, "Windows Root/Intermediate CA stores")) {
-                diagnostics.add("Windows Root/Intermediate CA stores loaded " + certificates.size() + " certificate(s).");
-                return true;
-            }
-            diagnostics.add("Windows Root/Intermediate CA stores produced no trust manager.");
-            return false;
+            delegates.add(createPkixTrustManager(anchors, intermediates));
+            diagnostics.add("Windows Root/Intermediate CA stores loaded " + anchors.size()
+                    + " root anchor(s) and " + intermediates.size() + " intermediate certificate(s).");
+            return true;
         } catch (Exception ex) {
-            diagnostics.add("Could not assemble Windows Root/Intermediate CA anchors: " + messageOf(ex));
+            diagnostics.add("Could not assemble Windows Root/Intermediate CA trust manager: " + messageOf(ex));
             return false;
         }
+    }
+
+    /**
+     * Builds a PKIX {@link X509TrustManager} with explicit trust anchors and optional intermediate
+     * certificates for path building. Revocation checking follows the JSSE default
+     * ({@code com.sun.net.ssl.checkRevocation}, off unless set), exactly like a trust manager built
+     * from a plain {@link KeyStore}.
+     *
+     * @param anchors       the trust anchors; must not be empty
+     * @param intermediates chain-building material that is <em>not</em> trusted by itself; may be empty
+     * @return the trust manager
+     * @throws GeneralSecurityException when the anchors are empty or PKIX is unavailable
+     * @throws IOException              when the in-memory anchor keystore cannot be initialised
+     */
+    static X509TrustManager createPkixTrustManager(Collection<X509Certificate> anchors,
+                                                   Collection<X509Certificate> intermediates)
+            throws GeneralSecurityException, IOException {
+        KeyStore anchorStore = KeyStore.getInstance(KeyStore.getDefaultType());
+        anchorStore.load(null, null);
+        int index = 0;
+        for (X509Certificate anchor : anchors) {
+            anchorStore.setCertificateEntry("win-trust-root-" + index++, anchor);
+        }
+        PKIXBuilderParameters parameters = new PKIXBuilderParameters(anchorStore, new X509CertSelector());
+        parameters.setRevocationEnabled(Boolean.getBoolean("com.sun.net.ssl.checkRevocation"));
+        if (!intermediates.isEmpty()) {
+            parameters.addCertStore(CertStore.getInstance("Collection",
+                    new CollectionCertStoreParameters(new ArrayList<X509Certificate>(intermediates))));
+        }
+        TrustManagerFactory factory = TrustManagerFactory.getInstance("PKIX");
+        factory.init(new CertPathTrustManagerParameters(parameters));
+        for (TrustManager trustManager : factory.getTrustManagers()) {
+            if (trustManager instanceof X509TrustManager) {
+                return (X509TrustManager) trustManager;
+            }
+        }
+        throw new NoSuchAlgorithmException("The PKIX TrustManagerFactory produced no X509TrustManager.");
     }
 
     private static boolean addTrustManager(List<X509TrustManager> delegates, KeyStore keyStore,

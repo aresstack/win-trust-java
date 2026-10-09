@@ -38,7 +38,8 @@ class SystemTrustDiagnosticTest {
             System.out.println("  jvmDefaultTrusted      = " + result.isJvmDefaultTrusted());
             System.out.println("  windowsRootTrusted     = " + result.isWindowsRootTrusted());
             System.out.println("  windowsCaStoresTrusted = " + result.isWindowsCaStoresTrusted()
-                    + " (" + result.getWindowsExportedCertificateCount() + " exported certificate(s))");
+                    + " (" + result.getWindowsRootAnchorCount() + " root anchor(s), "
+                    + result.getWindowsIntermediateCount() + " intermediate(s))");
             System.out.println("  fallbackToJvmDefault   = " + result.isFallbackToJvmDefault());
             System.out.println("  acceptedIssuers        = "
                     + (result.getTrustManager() == null ? "n/a" : result.getTrustManager().getAcceptedIssuers().length));

@@ -54,9 +54,12 @@ even though proxy discovery and resolution succeeded. Two Windows details make t
    even when the corporate root *is* trusted via `Windows-ROOT`.
 
 `win-trust-java` closes that gap by exporting the Root **and** Intermediate CA stores (machine and
-user scope) and making their certificates additional trust anchors. Only certificates the
-operating system already trusts are used, so validation is not weakened — it is brought in line
-with what the browser on the same machine does.
+user scope). Root-store certificates become additional trust anchors; Intermediate-store
+certificates are handed to Java's PKIX path builder as chain-building material only, so the
+missing intermediate can be filled in exactly as SChannel does. Nothing is trusted that Windows
+does not trust: the Intermediate store is a cache Windows fills from every chain it sees, so its
+entries are never promoted to anchors — an intermediate whose root is absent or distrusted stays
+untrusted.
 
 ## Trust sources
 
@@ -67,7 +70,7 @@ is accepted when **any** enabled source validates it; each source is a regular P
 | --- | --- | --- | --- |
 | `useJvmDefault` | JVM default truststore (`cacerts` or `javax.net.ssl.trustStore`) | nothing | Plain JVM behaviour. |
 | `useWindowsRoot` | `Windows-ROOT` keystore via `SunMSCAPI` | Windows | Trusted Root CAs only, in-process, no external process. |
-| `useWindowsCaStores` | `Cert:\LocalMachine\CA`, `Cert:\CurrentUser\CA`, `Cert:\LocalMachine\Root`, `Cert:\CurrentUser\Root` | Windows, `powershell.exe` | The only way to get the **Intermediate** store; also picks up GPO/enterprise-pushed CAs. |
+| `useWindowsCaStores` | `Cert:\LocalMachine\Root`, `Cert:\CurrentUser\Root` as **anchors**; `Cert:\LocalMachine\CA`, `Cert:\CurrentUser\CA` as **path-building material** | Windows, `powershell.exe` | The only way to get the **Intermediate** store; also picks up GPO/enterprise-pushed CAs. Built with `PKIXBuilderParameters` + a `CertStore` of the intermediates. |
 
 `CertificateTrustConfiguration.defaults()` enables all three — the combination that makes
 intercepting proxies work out of the box. `CertificateTrustConfiguration.jvmDefaultOnly()` never
@@ -143,12 +146,14 @@ SystemTrustSslSocketFactory.Result trust = SystemTrustSslSocketFactory.build(nul
 
 trust.isJvmDefaultTrusted();                 // true
 trust.isWindowsRootTrusted();                // true on Windows, false elsewhere
-trust.isWindowsCaStoresTrusted();            // true when the PowerShell export yielded certificates
-trust.getWindowsExportedCertificateCount();  // e.g. 143
+trust.isWindowsCaStoresTrusted();            // true when the PowerShell export yielded root anchors
+trust.getWindowsRootAnchorCount();           // e.g. 410 (Root stores → trust anchors)
+trust.getWindowsIntermediateCount();         // e.g. 164 (Intermediate stores → path building only)
+trust.getWindowsExportedCertificateCount();  // 574 = both together
 trust.isFallbackToJvmDefault();              // true only when NO source produced a trust manager
 trust.getDiagnostics();                      // ["JVM default truststore (cacerts) loaded.",
                                              //  "Windows-ROOT store loaded.",
-                                             //  "Windows Root/Intermediate CA stores loaded 143 certificate(s)."]
+                                             //  "Windows Root/Intermediate CA stores loaded 410 root anchor(s) and 164 intermediate certificate(s)."]
 ```
 
 A connection test in an application can therefore distinguish "the proxy is wrong" from "the
@@ -157,16 +162,17 @@ the cause, for example
 `Windows Root/Intermediate CA export: Windows certificate export failed: Cannot run program "powershell.exe" …`.
 
 `WindowsCertificateStores.loadRootAndIntermediateCertificates()` is public as well, for callers
-that want the raw `X509Certificate` list (e.g. to add them to their own keystore).
+that want the raw `X509Certificate` lists (`getRootCertificates()` for anchors,
+`getIntermediateCertificates()` for chain building, e.g. to feed their own `PKIXBuilderParameters`).
 
 ## Hardened machines: inline PowerShell, no temporary files
 
 The Windows store export runs as **one inline `powershell.exe -NoProfile -NonInteractive
 -ExecutionPolicy Bypass -Command …` one-liner** that prints one Base64-encoded DER certificate
-per line:
+per line, prefixed with the store kind (`ROOT ` or `CA `):
 
 ```powershell
-$ErrorActionPreference = 'SilentlyContinue'; foreach ($store in @('Cert:\LocalMachine\CA','Cert:\CurrentUser\CA','Cert:\LocalMachine\Root','Cert:\CurrentUser\Root')) { Get-ChildItem -Path $store | ForEach-Object { [Convert]::ToBase64String($_.RawData) } }
+$ErrorActionPreference = 'SilentlyContinue'; foreach ($store in @('Cert:\LocalMachine\Root','Cert:\CurrentUser\Root')) { Get-ChildItem -Path $store | ForEach-Object { 'ROOT ' + [Convert]::ToBase64String($_.RawData) } }; foreach ($store in @('Cert:\LocalMachine\CA','Cert:\CurrentUser\CA')) { Get-ChildItem -Path $store | ForEach-Object { 'CA ' + [Convert]::ToBase64String($_.RawData) } }
 ```
 
 It never writes a `.ps1` to `%TEMP%`, so it keeps working where GPO execution policy or
@@ -186,7 +192,7 @@ If PowerShell itself is locked down, `useWindowsRoot` still works in-process thr
 | `SystemTrustSslSocketFactory` | Builds (and caches) the combined `SSLSocketFactory` / `SSLContext` / `X509TrustManager`. |
 | `SystemTrustSslSocketFactory.Result` | The factory plus diagnostics: which sources loaded, how many certificates, what failed. |
 | `WindowsCertificateStores` | Exports the Windows Root/Intermediate CA stores via inline PowerShell. |
-| `WindowsCertificateStores.Result` | The exported certificates plus an optional error message. |
+| `WindowsCertificateStores.Result` | The exported certificates (roots and intermediates separately) plus an optional error message. |
 
 ## Runtime requirements
 
@@ -199,9 +205,10 @@ If PowerShell itself is locked down, `useWindowsRoot` still works in-process thr
 
 The published **artifact targets Java 8** (`maven.compiler.source/target = 1.8`).
 
-- **Maven** (used by CI and the release) runs on **JDK 8**:
+- **Maven Wrapper** (used by CI and the release) runs on **JDK 8** with the Maven version pinned
+  in `.mvn/wrapper/maven-wrapper.properties` (3.9.16):
   ```bash
-  mvn -B clean verify -Dgpg.skip=true   # tests + sources jar + javadoc jar
+  ./mvnw -B clean verify -Dgpg.skip=true   # tests + sources jar + javadoc jar
   ```
 - **Gradle wrapper**, pinned to Gradle 8.14.3 so it still runs on JDK 8:
   ```bash
@@ -211,8 +218,8 @@ The published **artifact targets Java 8** (`maven.compiler.source/target = 1.8`)
 Two opt-in, environment-touching tests exist for Windows machines:
 
 ```bash
-mvn verify -Dwintrust.diagnostics=true   # prints which source loaded what; never fails
-mvn verify -Dwintrust.integration=true   # asserts the real inline PowerShell export works
+./mvnw verify -Dwintrust.diagnostics=true   # prints which source loaded what; never fails
+./mvnw verify -Dwintrust.integration=true   # asserts the real inline PowerShell export works
 ```
 
 CI runs the unit tests on Linux and the real export on a Windows runner for every push.
@@ -220,11 +227,14 @@ CI runs the unit tests on Linux and the real export on a Windows runner for ever
 ## Releasing
 
 Releases are published to Maven Central by
-[`.github/workflows/release.yml`](.github/workflows/release.yml) whenever a `v*` tag is pushed
-(`mvn -B clean deploy` on JDK 8 with the `central-publishing-maven-plugin`, signed with GPG;
-credentials come from the `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`, `GPG_PRIVATE_KEY` and
-`GPG_PASSPHRASE` secrets). `release.ps1` builds locally, creates the annotated tag from the
-version in `pom.xml` and pushes it.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) whenever a `v*` tag is pushed,
+or manually via *Run workflow* (`workflow_dispatch`, which tags the released version itself).
+It runs `./mvnw -B clean deploy` on JDK 8 with the `central-publishing-maven-plugin`, signed with
+GPG; credentials come from the `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`, `GPG_PRIVATE_KEY` and
+`GPG_PASSPHRASE` secrets. The Maven Wrapper matters here: the runner's preinstalled Maven 3.10
+leaves a `maven-metadata-local.xml` in the staging bundle that Central rejects. `release.ps1`
+builds locally with the wrapper, creates the annotated tag from the version in `pom.xml` and
+pushes it.
 
 ## License
 

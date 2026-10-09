@@ -27,7 +27,8 @@ class WindowsCertificateStoresIntegrationTest {
 
         System.out.println("[win-trust-java] Windows export: " + stores);
         assertNull(stores.getError(), "the inline PowerShell export must succeed on this machine");
-        assertFalse(stores.getCertificates().isEmpty(), "a Windows machine always has root certificates");
+        assertFalse(stores.getRootCertificates().isEmpty(), "a Windows machine always has root certificates");
+        assertFalse(stores.getIntermediateCertificates().isEmpty(), "a Windows machine always has intermediate certificates");
     }
 
     @Test
@@ -39,7 +40,10 @@ class WindowsCertificateStoresIntegrationTest {
         assertTrue(result.isJvmDefaultTrusted());
         assertTrue(result.isWindowsRootTrusted(), "SunMSCAPI Windows-ROOT must load on Windows");
         assertTrue(result.isWindowsCaStoresTrusted());
-        assertTrue(result.getWindowsExportedCertificateCount() > 0);
+        assertTrue(result.getWindowsRootAnchorCount() > 0);
+        assertTrue(result.getWindowsIntermediateCount() > 0);
+        assertTrue(result.getWindowsExportedCertificateCount()
+                == result.getWindowsRootAnchorCount() + result.getWindowsIntermediateCount());
         assertFalse(result.isFallbackToJvmDefault());
         assertTrue(result.getTrustManager().getAcceptedIssuers().length > 0);
     }

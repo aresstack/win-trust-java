@@ -74,8 +74,7 @@ class CompositeX509TrustManagerTest {
 
     @Test
     void aggregatesAcceptedIssuersOfAllDelegatesAndToleratesNull() throws Exception {
-        X509Certificate certificate = WindowsCertificateStores
-                .parseCertificates(TestCertificates.TEST_CA_BASE64).get(0);
+        X509Certificate certificate = TestCertificates.decode(TestCertificates.TEST_CA_BASE64);
         RecordingTrustManager withIssuer = new RecordingTrustManager(true);
         withIssuer.issuers = new X509Certificate[]{certificate};
         RecordingTrustManager withoutIssuers = new RecordingTrustManager(true);

@@ -5,11 +5,13 @@ import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 
 import java.security.cert.X509Certificate;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -19,38 +21,57 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class WindowsCertificateStoresTest {
 
+    private static final String ROOT_LINE = WindowsCertificateStores.ROOT_MARKER + TestCertificates.ROOT_BASE64;
+    private static final String CA_LINE = WindowsCertificateStores.INTERMEDIATE_MARKER + TestCertificates.INTERMEDIATE_BASE64;
+
     // ── parsing ──
 
     @Test
-    void parsesOneBase64DerCertificatePerLine() throws Exception {
-        List<X509Certificate> certificates =
-                WindowsCertificateStores.parseCertificates(TestCertificates.TEST_CA_BASE64 + "\r\n");
+    void parsesRootAndIntermediateLinesIntoSeparateLists() throws Exception {
+        WindowsCertificateStores.Result result = WindowsCertificateStores.parse(ROOT_LINE + "\r\n" + CA_LINE + "\r\n");
 
-        assertEquals(1, certificates.size());
-        assertTrue(certificates.get(0).getSubjectX500Principal().getName()
-                .contains("CN=" + TestCertificates.TEST_CA_SUBJECT_CN));
+        assertEquals(1, result.getRootCertificates().size());
+        assertEquals(1, result.getIntermediateCertificates().size());
+        assertEquals(2, result.getCertificates().size());
+        assertTrue(result.getRootCertificates().get(0).getSubjectX500Principal().getName().contains("test root"));
+        assertTrue(result.getIntermediateCertificates().get(0).getSubjectX500Principal().getName().contains("test intermediate"));
+        assertNull(result.getError());
     }
 
     @Test
     void deduplicatesCertificatesAndSkipsNoise() throws Exception {
         String output = "\r\n"
-                + TestCertificates.TEST_CA_BASE64 + "\r\n"
+                + ROOT_LINE + "\r\n"
                 + "WARNING: something PowerShell printed to stdout\r\n"
-                + "   " + TestCertificates.TEST_CA_BASE64 + "   \n"
-                + "bm90IGEgY2VydGlmaWNhdGU=\n"            // valid Base64, not a certificate
-                + "!!! not base64 at all !!!\n"
-                + TestCertificates.TEST_CA_BASE64;         // no trailing newline
+                + "   " + ROOT_LINE + "   \n"                                            // machine + user scope overlap
+                + WindowsCertificateStores.INTERMEDIATE_MARKER + "bm90IGEgY2VydGlmaWNhdGU=\n"  // valid Base64, not a certificate
+                + WindowsCertificateStores.ROOT_MARKER + "!!! not base64 at all !!!\n"
+                + TestCertificates.INTERMEDIATE_BASE64 + "\n"                             // no marker: ignored
+                + CA_LINE + "\n"
+                + CA_LINE;                                                                  // no trailing newline
 
-        List<X509Certificate> certificates = WindowsCertificateStores.parseCertificates(output);
+        WindowsCertificateStores.Result result = WindowsCertificateStores.parse(output);
 
-        assertEquals(1, certificates.size(), "machine and user scopes overlap; duplicates collapse");
+        assertEquals(1, result.getRootCertificates().size(), "duplicates collapse");
+        assertEquals(1, result.getIntermediateCertificates().size(), "duplicates collapse, unmarked lines are ignored");
+    }
+
+    @Test
+    void aCertificateInBothStoresCountsAsRootOnly() throws Exception {
+        String output = WindowsCertificateStores.INTERMEDIATE_MARKER + TestCertificates.ROOT_BASE64 + "\n"
+                + ROOT_LINE + "\n";
+
+        WindowsCertificateStores.Result result = WindowsCertificateStores.parse(output);
+
+        assertEquals(1, result.getRootCertificates().size());
+        assertTrue(result.getIntermediateCertificates().isEmpty(), "a root is never listed as intermediate as well");
     }
 
     @Test
     void parsesNothingFromEmptyOrNullOutput() throws Exception {
-        assertTrue(WindowsCertificateStores.parseCertificates(null).isEmpty());
-        assertTrue(WindowsCertificateStores.parseCertificates("").isEmpty());
-        assertTrue(WindowsCertificateStores.parseCertificates("  \r\n \n").isEmpty());
+        assertTrue(WindowsCertificateStores.parse(null).getCertificates().isEmpty());
+        assertTrue(WindowsCertificateStores.parse("").getCertificates().isEmpty());
+        assertTrue(WindowsCertificateStores.parse("  \r\n \n").getCertificates().isEmpty());
     }
 
     // ── hardening: inline -Command, never a temp .ps1 ──
@@ -84,13 +105,14 @@ class WindowsCertificateStoresTest {
     }
 
     @Test
-    void scriptExportsRootAndIntermediateStoresInMachineAndUserScope() {
+    void scriptExportsRootStoresAsAnchorsAndIntermediateStoresAsMaterial() {
         String script = WindowsCertificateStores.buildScript();
 
-        assertTrue(script.contains("'Cert:\\LocalMachine\\CA'"), script);
-        assertTrue(script.contains("'Cert:\\CurrentUser\\CA'"), script);
-        assertTrue(script.contains("'Cert:\\LocalMachine\\Root'"), script);
-        assertTrue(script.contains("'Cert:\\CurrentUser\\Root'"), script);
+        assertTrue(script.contains("@('Cert:\\LocalMachine\\Root','Cert:\\CurrentUser\\Root')"), script);
+        assertTrue(script.contains("@('Cert:\\LocalMachine\\CA','Cert:\\CurrentUser\\CA')"), script);
+        assertTrue(script.contains("'" + WindowsCertificateStores.ROOT_MARKER + "' + [Convert]"), script);
+        assertTrue(script.contains("'" + WindowsCertificateStores.INTERMEDIATE_MARKER + "' + [Convert]"), script);
+        assertTrue(script.indexOf("\\Root'") < script.indexOf("\\CA'"), "roots are printed first");
         assertTrue(script.startsWith("$ErrorActionPreference = 'SilentlyContinue';"),
                 "a missing store must not abort the whole export");
     }
@@ -109,16 +131,18 @@ class WindowsCertificateStoresTest {
     }
 
     @Test
-    void resultIsUnmodifiable() throws Exception {
+    void resultIsUnmodifiableAndDescribesItself() {
+        X509Certificate root = TestCertificates.decode(TestCertificates.ROOT_BASE64);
         WindowsCertificateStores.Result result = new WindowsCertificateStores.Result(
-                WindowsCertificateStores.parseCertificates(TestCertificates.TEST_CA_BASE64), "boom");
+                Collections.singletonList(root), Collections.<X509Certificate>emptyList(), "boom");
 
         assertEquals(1, result.getCertificates().size());
         assertFalse(result.isSuccessful());
         assertEquals("boom", result.getError());
-        assertTrue(result.toString().contains("certificates=1"), result.toString());
+        assertTrue(result.toString().contains("roots=1"), result.toString());
+        assertTrue(result.toString().contains("intermediates=0"), result.toString());
         assertTrue(result.toString().contains("boom"), result.toString());
-        org.junit.jupiter.api.Assertions.assertThrows(UnsupportedOperationException.class,
-                () -> result.getCertificates().clear());
+        assertThrows(UnsupportedOperationException.class, () -> result.getCertificates().clear());
+        assertThrows(UnsupportedOperationException.class, () -> result.getRootCertificates().clear());
     }
 }

@@ -1,6 +1,7 @@
 package com.aresstack.wintrust;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -41,19 +42,43 @@ final class PowerShellRunner {
 
     /**
      * Builds the exact command line used by {@link #runInlineCommand()}:
-     * {@code powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command <script>}.
-     * Package-private so a unit test can assert it without spawning a process.
+     * {@code <SystemRoot>\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -Command <script>}.
+     *
+     * <p>Windows PowerShell is addressed by its fixed install location (falling back to a plain
+     * {@code powershell.exe} lookup only when {@code %SystemRoot%} is not set), so a {@code powershell.exe}
+     * planted in the application directory or the current working directory, which {@code CreateProcess}
+     * searches before {@code System32}, is never picked up. {@code -ExecutionPolicy Bypass} is
+     * deliberately absent: the execution policy governs script <em>files</em> only, an inline
+     * {@code -Command} runs under every policy, and the flag is a well-known EDR/SIEM indicator that
+     * would make the export look like an attack on exactly the hardened machines it targets.
+     * Package-private so a unit test can assert it without spawning a process.</p>
      */
     List<String> buildInlineCommand() {
         List<String> command = new ArrayList<String>();
-        command.add("powershell.exe");
+        command.add(resolvePowerShellExecutable());
         command.add("-NoProfile");
         command.add("-NonInteractive");
-        command.add("-ExecutionPolicy");
-        command.add("Bypass");
         command.add("-Command");
         command.add(script);
         return command;
+    }
+
+    /**
+     * @return the absolute path of Windows PowerShell when {@code %SystemRoot%} is set and the file
+     *         exists there, otherwise the bare {@code powershell.exe} (resolved through {@code PATH})
+     */
+    static String resolvePowerShellExecutable() {
+        String systemRoot = System.getenv("SystemRoot");
+        if (systemRoot == null || systemRoot.trim().length() == 0) {
+            systemRoot = System.getenv("windir");
+        }
+        if (systemRoot != null && systemRoot.trim().length() > 0) {
+            File fixed = new File(systemRoot.trim(), "System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+            if (fixed.isFile()) {
+                return fixed.getAbsolutePath();
+            }
+        }
+        return "powershell.exe";
     }
 
     /**
@@ -67,6 +92,9 @@ final class PowerShellRunner {
         ExecutorService executor = Executors.newFixedThreadPool(2, new DaemonThreadFactory());
         try {
             process = new ProcessBuilder(buildInlineCommand()).start();
+            // The script is complete on the command line; nothing is ever written to stdin. Closing it
+            // right away means PowerShell can never sit waiting for input.
+            process.getOutputStream().close();
 
             Future<String> stdout = executor.submit(new StreamReader(process.getInputStream(), Integer.MAX_VALUE));
             Future<String> stderr = executor.submit(new StreamReader(process.getErrorStream(), MAX_STDERR_CHARS));
@@ -138,7 +166,7 @@ final class PowerShellRunner {
     }
 
     /** Reads a stream to the end (always draining it) and keeps at most {@code limit} characters. */
-    private static final class StreamReader implements Callable<String> {
+    static final class StreamReader implements Callable<String> {
 
         private final InputStream stream;
         private final int limit;
@@ -155,8 +183,16 @@ final class PowerShellRunner {
             try {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    if (builder.length() < limit) {
+                    // Keep draining even after the limit is reached, so the process never blocks on
+                    // a full pipe; but never retain more than `limit` characters in memory.
+                    int remaining = limit - builder.length();
+                    if (remaining <= 0) {
+                        continue;
+                    }
+                    if (line.length() + 1 <= remaining) {
                         builder.append(line).append('\n');
+                    } else {
+                        builder.append(line, 0, remaining);
                     }
                 }
                 return builder.toString();

@@ -168,18 +168,38 @@ that want the raw `X509Certificate` lists (`getRootCertificates()` for anchors,
 ## Hardened machines: inline PowerShell, no temporary files
 
 The Windows store export runs as **one inline `powershell.exe -NoProfile -NonInteractive
--ExecutionPolicy Bypass -Command …` one-liner** that prints one Base64-encoded DER certificate
-per line, prefixed with the store kind (`ROOT ` or `CA `):
+-Command …` one-liner** that prints one Base64-encoded DER certificate per line, prefixed with the
+store kind (`ROOT ` or `CA `):
 
 ```powershell
-$ErrorActionPreference = 'SilentlyContinue'; foreach ($store in @('Cert:\LocalMachine\Root','Cert:\CurrentUser\Root')) { Get-ChildItem -Path $store | ForEach-Object { 'ROOT ' + [Convert]::ToBase64String($_.RawData) } }; foreach ($store in @('Cert:\LocalMachine\CA','Cert:\CurrentUser\CA')) { Get-ChildItem -Path $store | ForEach-Object { 'CA ' + [Convert]::ToBase64String($_.RawData) } }
+$ErrorActionPreference = 'SilentlyContinue'; $clm = $ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage'; foreach ($store in @('Cert:\LocalMachine\Root','Cert:\CurrentUser\Root')) { try { Get-ChildItem -Path $store -ErrorAction Stop | ForEach-Object { if ($clm) { 'ROOT ' + (ConvertTo-Json -InputObject $_.RawData -Compress) } else { 'ROOT ' + [Convert]::ToBase64String($_.RawData) } } } catch { 'ERR ' + $store + ': ' + $_.Exception.Message } }; foreach ($store in @('Cert:\LocalMachine\CA','Cert:\CurrentUser\CA')) { try { Get-ChildItem -Path $store -ErrorAction Stop | ForEach-Object { if ($clm) { 'CA ' + (ConvertTo-Json -InputObject $_.RawData -Compress) } else { 'CA ' + [Convert]::ToBase64String($_.RawData) } } } catch { 'ERR ' + $store + ': ' + $_.Exception.Message } }
 ```
+
+A store that cannot be read (for example a locked-down `Cert:\CurrentUser` hive) does not abort the
+export: the remaining stores are still printed and the failure comes back as an `ERR <store>: <message>`
+line, which `WindowsCertificateStores.Result.getError()` and the factory diagnostics then report as
+`Windows Root/Intermediate CA export: Certificate store(s) could not be read: …` while the certificates
+that were exported are still used. A partial export is therefore never mistaken for a complete one.
 
 It never writes a `.ps1` to `%TEMP%`, so it keeps working where GPO execution policy or
 AppLocker block unsigned script files — the same hardening rule `win-proxy-java` applies to PAC
-URL discovery. stdout and stderr are drained concurrently (no pipe-buffer deadlock on large
-stores), the process is bounded by a timeout (`WindowsCertificateStores.DEFAULT_TIMEOUT_SECONDS`,
-25 s; an overload accepts a custom value) and is killed when it exceeds it.
+URL discovery. Further details that matter on locked-down machines:
+
+- **Constrained Language Mode.** Where AppLocker/WDAC enforce PowerShell's Constrained Language
+  Mode, `[Convert]::ToBase64String` is not callable. The one-liner detects that mode and emits the
+  DER bytes as a JSON integer array via `ConvertTo-Json` instead (cmdlets stay allowed); the Java
+  side accepts both encodings. CI runs the export in Constrained Language Mode on the Windows runner.
+- **No `-ExecutionPolicy Bypass`.** The execution policy applies to script files only, so the flag
+  would buy nothing for an inline `-Command` — and it is a well-known EDR/SIEM indicator.
+- **Fixed executable path.** Windows PowerShell is started from
+  `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` (plain `powershell.exe` only when
+  `%SystemRoot%` is unset), so a `powershell.exe` planted in the application or working directory,
+  which `CreateProcess` would search first, is never executed.
+- **Bounded.** stdout and stderr are drained concurrently (no pipe-buffer deadlock on large
+  stores), stderr is capped at 4 000 characters, stdin is closed immediately, and the process is
+  killed once it exceeds the timeout (`WindowsCertificateStores.DEFAULT_TIMEOUT_SECONDS`, 25 s;
+  `CertificateTrustConfiguration.builder().windowsExportTimeoutSeconds(…)` raises it for slow
+  machines with huge stores).
 
 If PowerShell itself is locked down, `useWindowsRoot` still works in-process through `SunMSCAPI`
 — you lose only the intermediate store, and the diagnostics say so.
@@ -193,6 +213,23 @@ If PowerShell itself is locked down, `useWindowsRoot` still works in-process thr
 | `SystemTrustSslSocketFactory.Result` | The factory plus diagnostics: which sources loaded, how many certificates, what failed. |
 | `WindowsCertificateStores` | Exports the Windows Root/Intermediate CA stores via inline PowerShell. |
 | `WindowsCertificateStores.Result` | The exported certificates (roots and intermediates separately) plus an optional error message. |
+
+## Migrating from the AskAI copies
+
+The three classes started life in [AskAI](https://github.com/Miguel0888/askai-java8)
+(`com.aresstack.askai.java8.net`). Switching to this artifact is a package rename to
+`com.aresstack.wintrust`, plus these deliberate behaviour changes:
+
+| AskAI copy | win-trust-java |
+| --- | --- |
+| Every exported Windows certificate (Root **and** Intermediate stores) became a trust anchor. | Only Root-store certificates are anchors; Intermediate-store certificates are PKIX path-building material. Validation is never weaker than Windows' own. |
+| Export via a temporary `.ps1` in `%TEMP%` run with `-ExecutionPolicy Bypass -File`. | One inline `-Command` one-liner, no temp file, no `Bypass`; works in Constrained Language Mode. |
+| `WindowsCertificateStores` was package-private and returned one flat list. | Public; `Result` separates `getRootCertificates()` and `getIntermediateCertificates()` and reports unreadable stores in `getError()`. |
+| Export failures were silent. | Every source reports what it loaded or why not in `Result.getDiagnostics()`; the export timeout is configurable. |
+| `HttpClientConfiguration` (proxy auth, User-Agent) lived next to the trust classes. | Not part of this library: it is an HTTP-client concern, not a trust concern. |
+
+`SystemTrustSslSocketFactory.build(...)` still caches one `Result` per configuration for the life
+of the JVM; call `clearCache()` after the machine's certificate stores changed.
 
 ## Runtime requirements
 

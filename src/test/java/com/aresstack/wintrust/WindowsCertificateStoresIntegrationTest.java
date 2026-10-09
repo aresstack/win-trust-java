@@ -5,6 +5,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,6 +30,32 @@ class WindowsCertificateStoresIntegrationTest {
         assertNull(stores.getError(), "the inline PowerShell export must succeed on this machine");
         assertFalse(stores.getRootCertificates().isEmpty(), "a Windows machine always has root certificates");
         assertFalse(stores.getIntermediateCertificates().isEmpty(), "a Windows machine always has intermediate certificates");
+    }
+
+    /**
+     * Runs the real export with the session locked down to PowerShell's Constrained Language Mode first
+     * (the mode AppLocker/WDAC enforce on hardened machines, where {@code [Convert]::ToBase64String}
+     * is not callable) and asserts the {@code ConvertTo-Json} branch produces the same certificates.
+     */
+    @Test
+    void exportStillWorksInConstrainedLanguageMode() throws Exception {
+        String script = "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; "
+                + WindowsCertificateStores.buildScript();
+
+        PowerShellRunner.Execution execution = new PowerShellRunner(script, 120L).runInlineCommand();
+        WindowsCertificateStores.Result constrained = WindowsCertificateStores.parse(execution.getStandardOutput());
+        WindowsCertificateStores.Result normal = WindowsCertificateStores.loadRootAndIntermediateCertificates();
+
+        System.out.println("[win-trust-java] Constrained Language Mode export: " + constrained
+                + " (exit code " + execution.getExitCode() + ", stderr: " + execution.getStandardError().trim() + ")");
+        assertEquals(0, execution.getExitCode(), execution.getStandardError());
+        assertTrue(execution.getStandardOutput().contains(WindowsCertificateStores.ROOT_MARKER + "["),
+                "the JSON byte-array branch must have been taken");
+        assertFalse(execution.getStandardOutput().contains(WindowsCertificateStores.ERROR_MARKER),
+                "no store may fail in Constrained Language Mode");
+        assertNull(constrained.getError());
+        assertEquals(normal.getRootCertificates().size(), constrained.getRootCertificates().size());
+        assertEquals(normal.getIntermediateCertificates().size(), constrained.getIntermediateCertificates().size());
     }
 
     @Test

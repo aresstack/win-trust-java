@@ -104,7 +104,9 @@ public final class SystemTrustSslSocketFactory {
         }
 
         /**
-         * @return the {@link SSLContext} behind {@link #getSocketFactory()}; never {@code null}
+         * @return the {@link SSLContext} behind {@link #getSocketFactory()}. {@code null} only in the
+         *         fallback case when even {@link SSLContext#getDefault()} is unavailable (the socket
+         *         factory is then {@link SSLSocketFactory#getDefault()}); the diagnostics say so.
          */
         public SSLContext getSslContext() {
             return sslContext;
@@ -201,7 +203,16 @@ public final class SystemTrustSslSocketFactory {
             if (cached != null) {
                 return cached;
             }
-            Result result = create(configuration);
+        }
+        // Build outside the lock: the Windows export can take seconds and must not stall unrelated
+        // configurations. Two threads racing on the same configuration do the work twice, harmlessly;
+        // the first result wins so every caller sees the same instance.
+        Result result = create(configuration);
+        synchronized (CACHE) {
+            Result cached = CACHE.get(configuration);
+            if (cached != null) {
+                return cached;
+            }
             CACHE.put(configuration, result);
             return result;
         }
@@ -231,8 +242,6 @@ public final class SystemTrustSslSocketFactory {
             if (addTrustManager(delegates, null, diagnostics, "JVM default truststore")) {
                 jvmDefault = true;
                 diagnostics.add("JVM default truststore (cacerts) loaded.");
-            } else {
-                diagnostics.add("JVM default truststore (cacerts) could not be loaded.");
             }
         }
 
@@ -241,7 +250,8 @@ public final class SystemTrustSslSocketFactory {
         }
 
         if (configuration.isUseWindowsCaStores()) {
-            WindowsCertificateStores.Result stores = WindowsCertificateStores.loadRootAndIntermediateCertificates();
+            WindowsCertificateStores.Result stores = WindowsCertificateStores
+                    .loadRootAndIntermediateCertificates(configuration.getWindowsExportTimeoutSeconds());
             rootAnchorCount = stores.getRootCertificates().size();
             intermediateCount = stores.getIntermediateCertificates().size();
             if (stores.getError() != null) {
@@ -312,7 +322,6 @@ public final class SystemTrustSslSocketFactory {
                 diagnostics.add("Windows-ROOT store loaded.");
                 return true;
             }
-            diagnostics.add("Windows-ROOT store produced no trust manager.");
             return false;
         } catch (Exception ex) {
             diagnostics.add("Windows-ROOT store unavailable: " + messageOf(ex));
@@ -399,6 +408,10 @@ public final class SystemTrustSslSocketFactory {
                     delegates.add((X509TrustManager) trustManager);
                     added = true;
                 }
+            }
+            if (!added) {
+                diagnostics.add(sourceName + ": the " + factory.getAlgorithm()
+                        + " TrustManagerFactory produced no X509TrustManager.");
             }
             return added;
         } catch (GeneralSecurityException ex) {

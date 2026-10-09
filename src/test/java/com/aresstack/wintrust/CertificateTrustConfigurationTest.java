@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CertificateTrustConfigurationTest {
@@ -64,5 +65,30 @@ class CertificateTrustConfigurationTest {
         assertTrue(text.contains("jvmDefault=true"), text);
         assertTrue(text.contains("windowsRoot=false"), text);
         assertTrue(text.contains("windowsCaStores=true"), text);
+    }
+
+    @Test
+    void exportTimeoutDefaultsTo25SecondsAndIsConfigurable() {
+        assertEquals(WindowsCertificateStores.DEFAULT_TIMEOUT_SECONDS,
+                CertificateTrustConfiguration.defaults().getWindowsExportTimeoutSeconds());
+        assertEquals(25L, CertificateTrustConfiguration.defaults().getWindowsExportTimeoutSeconds());
+
+        CertificateTrustConfiguration slow = CertificateTrustConfiguration.builder()
+                .windowsExportTimeoutSeconds(90L)
+                .build();
+
+        assertEquals(90L, slow.getWindowsExportTimeoutSeconds());
+        assertEquals(new CertificateTrustConfiguration(true, true, true, 90L), slow);
+        assertNotEquals(CertificateTrustConfiguration.defaults(), slow, "the timeout is part of the cache key");
+        assertNotEquals(CertificateTrustConfiguration.defaults().hashCode(), slow.hashCode());
+        assertTrue(slow.toString().contains("windowsExportTimeoutSeconds=90"), slow.toString());
+    }
+
+    @Test
+    void exportTimeoutMustBePositive() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new CertificateTrustConfiguration(true, true, true, 0L));
+        assertThrows(IllegalArgumentException.class,
+                () -> CertificateTrustConfiguration.builder().windowsExportTimeoutSeconds(-1L).build());
     }
 }

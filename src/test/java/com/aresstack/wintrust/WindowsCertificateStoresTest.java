@@ -5,6 +5,7 @@ import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 
 import java.security.cert.X509Certificate;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 
@@ -115,6 +116,105 @@ class WindowsCertificateStoresTest {
         assertTrue(script.indexOf("\\Root'") < script.indexOf("\\CA'"), "roots are printed first");
         assertTrue(script.startsWith("$ErrorActionPreference = 'SilentlyContinue';"),
                 "a missing store must not abort the whole export");
+    }
+
+    @Test
+    void scriptFallsBackToConvertToJsonInConstrainedLanguageMode() {
+        String script = WindowsCertificateStores.buildScript();
+
+        assertTrue(script.contains("$clm = $ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage';"), script);
+        assertTrue(script.contains("if ($clm) { 'ROOT ' + (ConvertTo-Json -InputObject $_.RawData -Compress) } else { 'ROOT ' + [Convert]::ToBase64String($_.RawData) }"),
+                script);
+        assertTrue(script.contains("if ($clm) { 'CA ' + (ConvertTo-Json -InputObject $_.RawData -Compress) } else { 'CA ' + [Convert]::ToBase64String($_.RawData) }"),
+                script);
+    }
+
+    @Test
+    void parseAcceptsJsonByteArraysProducedInConstrainedLanguageMode() throws Exception {
+        String json = jsonArray(Base64.getMimeDecoder().decode(TestCertificates.ROOT_BASE64));
+        String output = WindowsCertificateStores.ROOT_MARKER + json + "\n"
+                + WindowsCertificateStores.INTERMEDIATE_MARKER + jsonArray(Base64.getMimeDecoder().decode(TestCertificates.INTERMEDIATE_BASE64)) + "\n"
+                + WindowsCertificateStores.ROOT_MARKER + "[48,130,999]\n"
+                + WindowsCertificateStores.ROOT_MARKER + "[]\n"
+                + WindowsCertificateStores.ROOT_MARKER + "[not,numbers]\n";
+
+        WindowsCertificateStores.Result result = WindowsCertificateStores.parse(output);
+
+        assertEquals(1, result.getRootCertificates().size());
+        assertEquals(1, result.getIntermediateCertificates().size());
+        assertTrue(result.getRootCertificates().get(0).getSubjectX500Principal().getName().contains("test root"));
+        assertNull(result.getError());
+        assertNull(WindowsCertificateStores.decodeBytes("[48,130,999]"));
+        assertNull(WindowsCertificateStores.decodeBytes("[]"));
+        assertNull(WindowsCertificateStores.decodeBytes("[not,numbers]"));
+        assertNull(WindowsCertificateStores.decodeBytes("not base64 ***"));
+    }
+
+    @Test
+    void timeoutMustBePositive() {
+        assertThrows(IllegalArgumentException.class,
+                () -> WindowsCertificateStores.loadRootAndIntermediateCertificates(0L));
+        assertThrows(IllegalArgumentException.class,
+                () -> WindowsCertificateStores.loadRootAndIntermediateCertificates(-5L));
+    }
+
+    private static String jsonArray(byte[] bytes) {
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < bytes.length; i++) {
+            if (i > 0) {
+                builder.append(',');
+            }
+            builder.append(bytes[i] & 0xff);
+        }
+        return builder.append(']').toString();
+    }
+
+    @Test
+    void scriptReportsAnUnreadableStoreInsteadOfSilentlyProducingAPartialExport() {
+        String script = WindowsCertificateStores.buildScript();
+
+        assertTrue(script.contains("try { Get-ChildItem -Path $store -ErrorAction Stop"), script);
+        assertTrue(script.contains("catch { '" + WindowsCertificateStores.ERROR_MARKER + "' + $store + ': ' + $_.Exception.Message }"),
+                script);
+        assertEquals(2, countOccurrences(script, "catch {"), "one try/catch per store loop");
+    }
+
+    @Test
+    void parseTurnsErrorLinesIntoAnErrorButKeepsTheCertificatesThatWereExported() throws Exception {
+        String output = ROOT_LINE + "\n"
+                + WindowsCertificateStores.ERROR_MARKER + "Cert:\\CurrentUser\\CA: Cannot find path 'Cert:\\CurrentUser\\CA' because it does not exist.\n"
+                + WindowsCertificateStores.ERROR_MARKER + "Cert:\\CurrentUser\\CA: Cannot find path 'Cert:\\CurrentUser\\CA' because it does not exist.\n"
+                + CA_LINE + "\n";
+
+        WindowsCertificateStores.Result result = WindowsCertificateStores.parse(output);
+
+        assertEquals(1, result.getRootCertificates().size());
+        assertEquals(1, result.getIntermediateCertificates().size());
+        assertFalse(result.isSuccessful());
+        assertEquals("Certificate store(s) could not be read: "
+                + "Cert:\\CurrentUser\\CA: Cannot find path 'Cert:\\CurrentUser\\CA' because it does not exist.",
+                result.getError(), "duplicate error lines are reported once");
+        assertTrue(result.toString().contains("roots=1, intermediates=1"), result.toString());
+    }
+
+    @Test
+    void parseReportsSeveralUnreadableStores() throws Exception {
+        String output = WindowsCertificateStores.ERROR_MARKER + "Cert:\\LocalMachine\\Root: access denied\n"
+                + WindowsCertificateStores.ERROR_MARKER + "Cert:\\LocalMachine\\CA: access denied\n";
+
+        WindowsCertificateStores.Result result = WindowsCertificateStores.parse(output);
+
+        assertTrue(result.getCertificates().isEmpty());
+        assertEquals("Certificate store(s) could not be read: Cert:\\LocalMachine\\Root: access denied; "
+                + "Cert:\\LocalMachine\\CA: access denied", result.getError());
+    }
+
+    private static int countOccurrences(String text, String needle) {
+        int count = 0;
+        for (int index = text.indexOf(needle); index >= 0; index = text.indexOf(needle, index + needle.length())) {
+            count++;
+        }
+        return count;
     }
 
     // ── non-Windows ──

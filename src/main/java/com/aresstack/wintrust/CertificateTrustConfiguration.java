@@ -33,16 +33,42 @@ public final class CertificateTrustConfiguration {
     private final boolean useJvmDefault;
     private final boolean useWindowsRoot;
     private final boolean useWindowsCaStores;
+    private final long windowsExportTimeoutSeconds;
 
     /**
+     * Same as the four-argument constructor with the default PowerShell timeout
+     * ({@link WindowsCertificateStores#DEFAULT_TIMEOUT_SECONDS}).
+     *
      * @param useJvmDefault      trust the JVM default truststore
      * @param useWindowsRoot     trust the {@code Windows-ROOT} store via {@code SunMSCAPI}
-     * @param useWindowsCaStores trust the Windows Root/Intermediate CA stores exported via PowerShell
+     * @param useWindowsCaStores use the Windows Root and Intermediate CA stores exported via PowerShell
+     *                           (Root certificates as trust anchors, Intermediate certificates as
+     *                           path-building material only)
      */
     public CertificateTrustConfiguration(boolean useJvmDefault, boolean useWindowsRoot, boolean useWindowsCaStores) {
+        this(useJvmDefault, useWindowsRoot, useWindowsCaStores, WindowsCertificateStores.DEFAULT_TIMEOUT_SECONDS);
+    }
+
+    /**
+     * @param useJvmDefault               trust the JVM default truststore
+     * @param useWindowsRoot              trust the {@code Windows-ROOT} store via {@code SunMSCAPI}
+     * @param useWindowsCaStores          use the Windows Root and Intermediate CA stores exported via
+     *                                    PowerShell (Root certificates as trust anchors, Intermediate
+     *                                    certificates as path-building material only)
+     * @param windowsExportTimeoutSeconds how long the PowerShell export may run before it is killed and
+     *                                    reported as failed; must be positive
+     * @throws IllegalArgumentException when {@code windowsExportTimeoutSeconds} is not positive
+     */
+    public CertificateTrustConfiguration(boolean useJvmDefault, boolean useWindowsRoot, boolean useWindowsCaStores,
+                                         long windowsExportTimeoutSeconds) {
+        if (windowsExportTimeoutSeconds <= 0) {
+            throw new IllegalArgumentException(
+                    "windowsExportTimeoutSeconds must be positive, got " + windowsExportTimeoutSeconds);
+        }
         this.useJvmDefault = useJvmDefault;
         this.useWindowsRoot = useWindowsRoot;
         this.useWindowsCaStores = useWindowsCaStores;
+        this.windowsExportTimeoutSeconds = windowsExportTimeoutSeconds;
     }
 
     /**
@@ -82,6 +108,14 @@ public final class CertificateTrustConfiguration {
     }
 
     /**
+     * @return the timeout for the PowerShell export of the Windows Root/Intermediate CA stores, in
+     *         seconds (default {@link WindowsCertificateStores#DEFAULT_TIMEOUT_SECONDS})
+     */
+    public long getWindowsExportTimeoutSeconds() {
+        return windowsExportTimeoutSeconds;
+    }
+
+    /**
      * @return {@code true} when at least one trust source is enabled
      */
     public boolean isAnySourceEnabled() {
@@ -99,7 +133,8 @@ public final class CertificateTrustConfiguration {
         CertificateTrustConfiguration that = (CertificateTrustConfiguration) other;
         return useJvmDefault == that.useJvmDefault
                 && useWindowsRoot == that.useWindowsRoot
-                && useWindowsCaStores == that.useWindowsCaStores;
+                && useWindowsCaStores == that.useWindowsCaStores
+                && windowsExportTimeoutSeconds == that.windowsExportTimeoutSeconds;
     }
 
     @Override
@@ -107,6 +142,7 @@ public final class CertificateTrustConfiguration {
         int result = useJvmDefault ? 1 : 0;
         result = 31 * result + (useWindowsRoot ? 1 : 0);
         result = 31 * result + (useWindowsCaStores ? 1 : 0);
+        result = 31 * result + (int) (windowsExportTimeoutSeconds ^ (windowsExportTimeoutSeconds >>> 32));
         return result;
     }
 
@@ -114,7 +150,8 @@ public final class CertificateTrustConfiguration {
     public String toString() {
         return "CertificateTrustConfiguration{jvmDefault=" + useJvmDefault
                 + ", windowsRoot=" + useWindowsRoot
-                + ", windowsCaStores=" + useWindowsCaStores + '}';
+                + ", windowsCaStores=" + useWindowsCaStores
+                + ", windowsExportTimeoutSeconds=" + windowsExportTimeoutSeconds + '}';
     }
 
     /**
@@ -124,6 +161,7 @@ public final class CertificateTrustConfiguration {
         private boolean useJvmDefault = true;
         private boolean useWindowsRoot = true;
         private boolean useWindowsCaStores = true;
+        private long windowsExportTimeoutSeconds = WindowsCertificateStores.DEFAULT_TIMEOUT_SECONDS;
 
         private Builder() {
         }
@@ -143,8 +181,18 @@ public final class CertificateTrustConfiguration {
             return this;
         }
 
+        /**
+         * @param seconds how long the PowerShell export may run before it is killed; must be positive.
+         *                Raise it on slow machines with very large certificate stores.
+         */
+        public Builder windowsExportTimeoutSeconds(long seconds) {
+            this.windowsExportTimeoutSeconds = seconds;
+            return this;
+        }
+
         public CertificateTrustConfiguration build() {
-            return new CertificateTrustConfiguration(useJvmDefault, useWindowsRoot, useWindowsCaStores);
+            return new CertificateTrustConfiguration(useJvmDefault, useWindowsRoot, useWindowsCaStores,
+                    windowsExportTimeoutSeconds);
         }
     }
 }

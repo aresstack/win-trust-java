@@ -1,0 +1,50 @@
+plugins {
+    id 'java'
+    id 'maven-publish'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+group = 'com.aresstack'
+version = '0.1.0'
+
+test {
+    useJUnitPlatform()
+    // Forward the opt-in switches to the forked test JVM so the manual,
+    // environment-touching tests can be enabled explicitly:
+    //   ./gradlew test -Dwintrust.diagnostics=true   (prints a trust report, never fails)
+    //   ./gradlew test -Dwintrust.integration=true   (asserts the real Windows export works)
+    ['wintrust.diagnostics', 'wintrust.integration'].each { name ->
+        if (System.getProperty(name) != null) {
+            systemProperty name, System.getProperty(name)
+        }
+    }
+    testLogging {
+        showStandardStreams = true
+        events 'passed', 'failed', 'skipped'
+    }
+}
+
+compileJava.options.encoding = 'UTF-8'
+compileTestJava.options.encoding = 'UTF-8'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            artifactId = 'win-trust-java'
+        }
+    }
+}

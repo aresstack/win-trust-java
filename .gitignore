@@ -1,0 +1,21 @@
+# Build output
+build/
+target/
+out/
+
+# Gradle
+.gradle/
+# NOTE: do NOT ignore the whole gradle/ directory.
+# gradle/wrapper/gradle-wrapper.jar and gradle-wrapper.properties MUST be
+# committed so the repo is reproducibly buildable via ./gradlew.
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+

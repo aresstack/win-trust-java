@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: JDK ${{ matrix.java }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        java: ['8', '21']
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Java ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      # bash on every runner: pwsh would split "-Dgpg.skip=true" into "-Dgpg" and ".skip=true".
+      # The two wintrust.* flags switch on the environment-touching tests, which only run on Windows
+      # (the real inline PowerShell export, also in Constrained Language Mode) and print the report.
+      - name: Build and test with the Maven Wrapper
+        shell: bash
+        run: ./mvnw -B clean verify -Dgpg.skip=true -Dwintrust.integration=true -Dwintrust.diagnostics=true
+
+      - name: Test with the Gradle wrapper
+        if: runner.os == 'Linux'
+        run: ./gradlew test --no-daemon

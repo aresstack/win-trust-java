@@ -1,0 +1,228 @@
+package com.aresstack.wintrust;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+/**
+ * Runs a PowerShell script <em>inline</em> via {@code powershell.exe -Command}.
+ *
+ * <p>No temporary {@code .ps1} file is ever written. That matters on hardened machines: an unsigned
+ * script file in {@code %TEMP%} is blocked by GPO execution policy or AppLocker, while an inline
+ * {@code -Command} is still allowed. This mirrors the PAC-URL discovery in
+ * {@code com.aresstack:win-proxy-java}.</p>
+ *
+ * <p>stdout and stderr are drained concurrently on their own threads, so a large export (hundreds of
+ * certificates) cannot fill the pipe buffer and deadlock the child process.</p>
+ */
+final class PowerShellRunner {
+
+    /** Upper bound for the captured stderr; only used for diagnostics. */
+    private static final int MAX_STDERR_CHARS = 4000;
+
+    private final List<String> executable;
+    private final String script;
+    private final long timeoutSeconds;
+
+    PowerShellRunner(String script, long timeoutSeconds) {
+        this(null, script, timeoutSeconds);
+    }
+
+    /**
+     * @param executable the command prefix to run instead of Windows PowerShell (tests substitute a
+     *                   small Java program here so the process handling runs on every platform);
+     *                   {@code null} means {@link #resolvePowerShellExecutable()}
+     */
+    PowerShellRunner(List<String> executable, String script, long timeoutSeconds) {
+        this.executable = executable == null ? null : new ArrayList<String>(executable);
+        this.script = script;
+        this.timeoutSeconds = timeoutSeconds;
+    }
+
+    /**
+     * Builds the exact command line used by {@link #runInlineCommand()}:
+     * {@code <SystemRoot>\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -Command <script>}.
+     *
+     * <p>Windows PowerShell is addressed by its fixed install location (falling back to a plain
+     * {@code powershell.exe} lookup only when {@code %SystemRoot%} is not set), so a {@code powershell.exe}
+     * planted in the application directory or the current working directory, which {@code CreateProcess}
+     * searches before {@code System32}, is never picked up. {@code -ExecutionPolicy Bypass} is
+     * deliberately absent: the execution policy governs script <em>files</em> only, an inline
+     * {@code -Command} runs under every policy, and the flag is a well-known EDR/SIEM indicator that
+     * would make the export look like an attack on exactly the hardened machines it targets.
+     * Package-private so a unit test can assert it without spawning a process.</p>
+     */
+    List<String> buildInlineCommand() {
+        List<String> command = new ArrayList<String>();
+        if (executable == null) {
+            command.add(resolvePowerShellExecutable());
+        } else {
+            command.addAll(executable);
+        }
+        command.add("-NoProfile");
+        command.add("-NonInteractive");
+        command.add("-Command");
+        command.add(script);
+        return command;
+    }
+
+    /**
+     * @return the absolute path of Windows PowerShell when {@code %SystemRoot%} is set and the file
+     *         exists there, otherwise the bare {@code powershell.exe} (resolved through {@code PATH})
+     */
+    static String resolvePowerShellExecutable() {
+        String systemRoot = System.getenv("SystemRoot");
+        if (systemRoot == null || systemRoot.trim().length() == 0) {
+            systemRoot = System.getenv("windir");
+        }
+        if (systemRoot != null && systemRoot.trim().length() > 0) {
+            File fixed = new File(systemRoot.trim(), "System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+            if (fixed.isFile()) {
+                return fixed.getAbsolutePath();
+            }
+        }
+        return "powershell.exe";
+    }
+
+    /**
+     * Executes the script inline and waits at most {@code timeoutSeconds} for it to finish.
+     *
+     * @return exit code, stdout and (truncated) stderr of the process
+     * @throws IOException when PowerShell cannot be started, times out or is interrupted
+     */
+    Execution runInlineCommand() throws IOException {
+        Process process = null;
+        ExecutorService executor = Executors.newFixedThreadPool(2, new DaemonThreadFactory());
+        try {
+            process = new ProcessBuilder(buildInlineCommand()).start();
+            // The script is complete on the command line; nothing is ever written to stdin. Closing it
+            // right away means PowerShell can never sit waiting for input.
+            process.getOutputStream().close();
+
+            Future<String> stdout = executor.submit(new StreamReader(process.getInputStream(), Integer.MAX_VALUE));
+            Future<String> stderr = executor.submit(new StreamReader(process.getErrorStream(), MAX_STDERR_CHARS));
+
+            int exitCode = waitFor(process);
+            String output = await(stdout, "stdout");
+            String error = await(stderr, "stderr");
+            return new Execution(exitCode, output, error);
+        } finally {
+            executor.shutdownNow();
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    private int waitFor(Process process) throws IOException {
+        try {
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                throw new IOException("PowerShell did not finish within " + timeoutSeconds + " seconds.");
+            }
+            return process.exitValue();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+            throw new IOException("Waiting for PowerShell was interrupted.", ex);
+        }
+    }
+
+    private String await(Future<String> future, String streamName) throws IOException {
+        try {
+            // The process has exited, so the readers only need to flush what is already buffered.
+            return future.get(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Reading PowerShell " + streamName + " was interrupted.", ex);
+        } catch (ExecutionException ex) {
+            throw new IOException("Could not read PowerShell " + streamName + ".", ex.getCause());
+        } catch (TimeoutException ex) {
+            throw new IOException("PowerShell " + streamName + " reader did not finish.", ex);
+        }
+    }
+
+    /** Exit code, stdout and stderr of one PowerShell run. */
+    static final class Execution {
+
+        private final int exitCode;
+        private final String standardOutput;
+        private final String standardError;
+
+        Execution(int exitCode, String standardOutput, String standardError) {
+            this.exitCode = exitCode;
+            this.standardOutput = standardOutput == null ? "" : standardOutput;
+            this.standardError = standardError == null ? "" : standardError;
+        }
+
+        int getExitCode() {
+            return exitCode;
+        }
+
+        String getStandardOutput() {
+            return standardOutput;
+        }
+
+        String getStandardError() {
+            return standardError;
+        }
+    }
+
+    /** Reads a stream to the end (always draining it) and keeps at most {@code limit} characters. */
+    static final class StreamReader implements Callable<String> {
+
+        private final InputStream stream;
+        private final int limit;
+
+        StreamReader(InputStream stream, int limit) {
+            this.stream = stream;
+            this.limit = limit;
+        }
+
+        @Override
+        public String call() throws IOException {
+            StringBuilder builder = new StringBuilder();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    // Keep draining even after the limit is reached, so the process never blocks on
+                    // a full pipe; but never retain more than `limit` characters in memory.
+                    int remaining = limit - builder.length();
+                    if (remaining <= 0) {
+                        continue;
+                    }
+                    if (line.length() + 1 <= remaining) {
+                        builder.append(line).append('\n');
+                    } else {
+                        builder.append(line, 0, remaining);
+                    }
+                }
+                return builder.toString();
+            } finally {
+                reader.close();
+            }
+        }
+    }
+
+    private static final class DaemonThreadFactory implements java.util.concurrent.ThreadFactory {
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "win-trust-java-powershell");
+            thread.setDaemon(true);
+            return thread;
+        }
+    }
+}

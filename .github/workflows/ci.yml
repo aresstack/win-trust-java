@@ -34,6 +34,8 @@ jobs:
 
       # On Windows the real certificate-store export is exercised against the runner's own
       # Root/Intermediate stores (powershell.exe -Command, no temporary .ps1).
+      # bash, not pwsh: PowerShell splits '-Dgpg.skip=true' into '-Dgpg' and '.skip=true'.
       - name: Build and test (Windows, real certificate stores)
         if: runner.os == 'Windows'
+        shell: bash
         run: mvn -B clean verify -Dgpg.skip=true -Dwintrust.integration=true -Dwintrust.diagnostics=true

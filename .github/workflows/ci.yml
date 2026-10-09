@@ -6,6 +6,9 @@ on:
       - '**'
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: JDK 8 on ${{ matrix.os }}
@@ -27,10 +30,11 @@ jobs:
           cache: maven
 
       # The artifact targets Java 8, so the whole build (compile, tests, sources and javadoc
-      # jars) runs on a real JDK 8. GPG signing only happens in the release workflow.
+      # jars) runs on a real JDK 8 and on the Maven version pinned by the Maven Wrapper
+      # (.mvn/wrapper), the same one the release uses. GPG signing only happens in the release.
       - name: Build and test (Linux)
         if: runner.os != 'Windows'
-        run: mvn -B clean verify -Dgpg.skip=true
+        run: ./mvnw -B clean verify -Dgpg.skip=true
 
       # The Gradle wrapper (8.14.3) is the second supported build path and must keep running on JDK 8.
       - name: Gradle build path (Linux)
@@ -43,4 +47,4 @@ jobs:
       - name: Build and test (Windows, real certificate stores)
         if: runner.os == 'Windows'
         shell: bash
-        run: mvn -B clean verify -Dgpg.skip=true -Dwintrust.integration=true -Dwintrust.diagnostics=true
+        run: ./mvnw -B clean verify -Dgpg.skip=true -Dwintrust.integration=true -Dwintrust.diagnostics=true

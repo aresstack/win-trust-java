@@ -48,7 +48,10 @@ function Assert-CommandExists([string]$Command) {
 Set-Location $PSScriptRoot
 
 Assert-CommandExists "git"
-Assert-CommandExists "mvn"
+$mavenWrapper = Join-Path $PSScriptRoot "mvnw.cmd"
+if (-not (Test-Path $mavenWrapper)) {
+    throw "Maven Wrapper not found: $mavenWrapper"
+}
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = Get-ProjectVersion
@@ -68,12 +71,12 @@ if ($existingTag) {
     throw "Tag already exists: $tagName"
 }
 
-Write-Step "Building Maven artifacts"
+Write-Step "Building Maven artifacts (Maven Wrapper, same Maven version as the release workflow)"
 $mavenArgs = @("clean", "verify")
 if ($SkipTests) {
     $mavenArgs += "-DskipTests"
 }
-Invoke-RequiredCommand "mvn" $mavenArgs
+Invoke-RequiredCommand $mavenWrapper $mavenArgs
 
 Write-Step "Creating local tag $tagName"
 Invoke-RequiredCommand "git" @("tag", "-a", $tagName, "-m", "Release $tagName")

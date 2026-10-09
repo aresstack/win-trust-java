@@ -32,6 +32,11 @@ jobs:
         if: runner.os != 'Windows'
         run: mvn -B clean verify -Dgpg.skip=true
 
+      # The Gradle wrapper (8.14.3) is the second supported build path and must keep running on JDK 8.
+      - name: Gradle build path (Linux)
+        if: runner.os != 'Windows'
+        run: ./gradlew test --no-daemon
+
       # On Windows the real certificate-store export is exercised against the runner's own
       # Root/Intermediate stores (powershell.exe -Command, no temporary .ps1).
       # bash, not pwsh: PowerShell splits '-Dgpg.skip=true' into '-Dgpg' and '.skip=true'.

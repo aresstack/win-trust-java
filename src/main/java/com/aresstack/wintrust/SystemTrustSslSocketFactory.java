@@ -6,21 +6,23 @@ import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
-import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertStore;
 import java.security.cert.CollectionCertStoreParameters;
 import java.security.cert.PKIXBuilderParameters;
+import java.security.cert.TrustAnchor;
 import java.security.cert.X509CertSelector;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Builds an {@link SSLSocketFactory} (and the matching {@link SSLContext} / {@link X509TrustManager})
@@ -358,18 +360,18 @@ public final class SystemTrustSslSocketFactory {
      * @param intermediates chain-building material that is <em>not</em> trusted by itself; may be empty
      * @return the trust manager
      * @throws GeneralSecurityException when the anchors are empty or PKIX is unavailable
-     * @throws IOException              when the in-memory anchor keystore cannot be initialised
      */
     static X509TrustManager createPkixTrustManager(Collection<X509Certificate> anchors,
                                                    Collection<X509Certificate> intermediates)
-            throws GeneralSecurityException, IOException {
-        KeyStore anchorStore = KeyStore.getInstance(KeyStore.getDefaultType());
-        anchorStore.load(null, null);
-        int index = 0;
+            throws GeneralSecurityException {
+        // Anchors are passed as TrustAnchor objects, not through a KeyStore: the JVM-wide default
+        // keystore type can be overridden (pkcs11, Windows-MY), which would either lose the anchors
+        // or, with Windows-MY, write them into the user's real Personal store.
+        Set<TrustAnchor> trustAnchors = new LinkedHashSet<TrustAnchor>();
         for (X509Certificate anchor : anchors) {
-            anchorStore.setCertificateEntry("win-trust-root-" + index++, anchor);
+            trustAnchors.add(new TrustAnchor(anchor, null));
         }
-        PKIXBuilderParameters parameters = new PKIXBuilderParameters(anchorStore, new X509CertSelector());
+        PKIXBuilderParameters parameters = new PKIXBuilderParameters(trustAnchors, new X509CertSelector());
         parameters.setRevocationEnabled(Boolean.getBoolean("com.sun.net.ssl.checkRevocation"));
         if (!intermediates.isEmpty()) {
             parameters.addCertStore(CertStore.getInstance("Collection",

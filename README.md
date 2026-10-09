@@ -255,11 +255,13 @@ The published **artifact targets Java 8** (`maven.compiler.source/target = 1.8`)
 Two opt-in, environment-touching tests exist for Windows machines:
 
 ```bash
-./mvnw verify -Dwintrust.diagnostics=true   # prints which source loaded what; never fails
-./mvnw verify -Dwintrust.integration=true   # asserts the real inline PowerShell export works
+./mvnw verify -Dgpg.skip=true -Dwintrust.diagnostics=true   # prints which source loaded what; never fails
+./mvnw verify -Dgpg.skip=true -Dwintrust.integration=true   # asserts the real inline PowerShell export works
 ```
 
-CI runs the unit tests on Linux and the real export on a Windows runner for every push.
+(`-Dgpg.skip=true` skips the artifact signing that only the release needs.) CI runs the unit tests
+on Linux and the real export, including the Constrained Language Mode variant, on a Windows runner
+for every pull request and every push to `main`.
 
 ## Releasing
 
@@ -268,10 +270,12 @@ Releases are published to Maven Central by
 or manually via *Run workflow* (`workflow_dispatch`, which tags the released version itself).
 It runs `./mvnw -B clean deploy` on JDK 8 with the `central-publishing-maven-plugin`, signed with
 GPG; credentials come from the `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`, `GPG_PRIVATE_KEY` and
-`GPG_PASSPHRASE` secrets. The Maven Wrapper matters here: the runner's preinstalled Maven 3.10
-leaves a `maven-metadata-local.xml` in the staging bundle that Central rejects. `release.ps1`
-builds locally with the wrapper, creates the annotated tag from the version in `pom.xml` and
-pushes it.
+`GPG_PASSPHRASE` secrets. A pushed tag must match the `pom.xml` version, otherwise the run fails
+before anything is uploaded. The Maven Wrapper matters here: the runner's preinstalled Maven 3.10
+leaves a `maven-metadata-local.xml` in the staging bundle that Central rejects, and the wrapper
+verifies the pinned Maven distribution against its SHA-256 before using it. `release.ps1` builds
+locally with the wrapper (unsigned, so no GPG setup is needed on the developer machine), creates
+the annotated tag from the version in `pom.xml` and pushes it.
 
 ## License
 

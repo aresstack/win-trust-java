@@ -72,7 +72,9 @@ if ($existingTag) {
 }
 
 Write-Step "Building Maven artifacts (Maven Wrapper, same Maven version as the release workflow)"
-$mavenArgs = @("clean", "verify")
+# Signing happens in the release workflow with the org's GPG key; the local build only proves
+# that the sources, tests and javadoc are release-ready, so it needs no GPG setup here.
+$mavenArgs = @("clean", "verify", "-Dgpg.skip=true")
 if ($SkipTests) {
     $mavenArgs += "-DskipTests"
 }

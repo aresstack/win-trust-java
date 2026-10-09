@@ -81,7 +81,8 @@ class WindowsCertificateStoresTest {
     void exportRunsInlineAndNeverWritesTempFile() {
         List<String> command = WindowsCertificateStores.buildCommand();
 
-        assertEquals("powershell.exe", command.get(0));
+        assertTrue(command.get(0).endsWith("powershell.exe"),
+                "Windows PowerShell from its fixed System32 location (or by name when %SystemRoot% is unset): " + command.get(0));
         assertTrue(command.contains("-NoProfile"));
         assertTrue(command.contains("-NonInteractive"));
         assertTrue(command.contains("-Command"), "export must use -Command");

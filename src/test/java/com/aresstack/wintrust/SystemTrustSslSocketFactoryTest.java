@@ -7,11 +7,17 @@ import org.junit.jupiter.api.condition.OS;
 
 import javax.net.ssl.SSLSocketFactory;
 
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import java.util.Collections;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SystemTrustSslSocketFactoryTest {
@@ -58,6 +64,7 @@ class SystemTrustSslSocketFactoryTest {
     }
 
     @Test
+    @DisabledOnOs(OS.WINDOWS) // defaults() enable the PowerShell export; only the opt-in tests may start it
     void nullConfigurationMeansDefaults() {
         SystemTrustSslSocketFactory.Result viaNull = SystemTrustSslSocketFactory.build(null);
         SystemTrustSslSocketFactory.Result viaDefaults =
@@ -132,5 +139,85 @@ class SystemTrustSslSocketFactoryTest {
             }
         }
         return false;
+    }
+
+    // ── Windows store branches, driven with known certificates on any platform ──
+
+    private static final CertificateTrustConfiguration JVM_PLUS_WINDOWS_CA = CertificateTrustConfiguration.builder()
+            .useWindowsRoot(false)
+            .build();
+    private static final X509Certificate ROOT = TestCertificates.decode(TestCertificates.ROOT_BASE64);
+    private static final X509Certificate INTERMEDIATE = TestCertificates.decode(TestCertificates.INTERMEDIATE_BASE64);
+    private static final X509Certificate LEAF = TestCertificates.decode(TestCertificates.LEAF_BASE64);
+
+    private static WindowsCertificateStores.Result stores(List<X509Certificate> roots,
+                                                          List<X509Certificate> intermediates, String error) {
+        return new WindowsCertificateStores.Result(roots, intermediates, error);
+    }
+
+    @Test
+    void exportedRootAndIntermediateMakeALeafOnlyChainTrustedThroughTheComposite() throws Exception {
+        SystemTrustSslSocketFactory.Result result = SystemTrustSslSocketFactory.assemble(JVM_PLUS_WINDOWS_CA,
+                stores(Collections.singletonList(ROOT), Collections.singletonList(INTERMEDIATE), null));
+
+        assertTrue(result.isJvmDefaultTrusted());
+        assertTrue(result.isWindowsCaStoresTrusted());
+        assertFalse(result.isFallbackToJvmDefault());
+        assertEquals(1, result.getWindowsRootAnchorCount());
+        assertEquals(1, result.getWindowsIntermediateCount());
+        assertEquals(2, result.getWindowsExportedCertificateCount());
+        assertTrue(result.getDiagnostics().contains(
+                "Windows Root/Intermediate CA stores loaded 1 root anchor(s) and 1 intermediate certificate(s)."),
+                result.getDiagnostics().toString());
+        // cacerts in front of it rejects the private chain; the composite still accepts the server
+        // certificate alone, because the Windows delegate completes the chain from the Intermediate store.
+        result.getTrustManager().checkServerTrusted(new X509Certificate[]{LEAF}, "RSA");
+        assertThrows(CertificateException.class, () -> SystemTrustSslSocketFactory
+                .build(CertificateTrustConfiguration.jvmDefaultOnly()).getTrustManager()
+                .checkServerTrusted(new X509Certificate[]{LEAF}, "RSA"));
+    }
+
+    @Test
+    void intermediatesWithoutARootAreIgnoredNotTrusted() {
+        SystemTrustSslSocketFactory.Result result = SystemTrustSslSocketFactory.assemble(JVM_PLUS_WINDOWS_CA,
+                stores(Collections.<X509Certificate>emptyList(), Collections.singletonList(INTERMEDIATE), null));
+
+        assertFalse(result.isWindowsCaStoresTrusted());
+        assertEquals(0, result.getWindowsRootAnchorCount());
+        assertEquals(1, result.getWindowsIntermediateCount());
+        assertTrue(result.getDiagnostics().contains("Windows Root/Intermediate CA stores contributed no trust anchors; "
+                + "1 intermediate certificate(s) ignored because there is no root to anchor them."),
+                result.getDiagnostics().toString());
+        assertThrows(CertificateException.class,
+                () -> result.getTrustManager().checkServerTrusted(new X509Certificate[]{LEAF, INTERMEDIATE}, "RSA"));
+    }
+
+    @Test
+    void partialExportIsReportedWhileItsCertificatesAreStillUsed() throws Exception {
+        SystemTrustSslSocketFactory.Result result = SystemTrustSslSocketFactory.assemble(JVM_PLUS_WINDOWS_CA,
+                stores(Collections.singletonList(ROOT), Collections.singletonList(INTERMEDIATE),
+                        "Certificate store(s) could not be read: Cert:\\CurrentUser\\CA: denied"));
+
+        assertTrue(result.isWindowsCaStoresTrusted());
+        assertTrue(result.getDiagnostics().contains(
+                "Windows Root/Intermediate CA export: Certificate store(s) could not be read: Cert:\\CurrentUser\\CA: denied"),
+                result.getDiagnostics().toString());
+        result.getTrustManager().checkServerTrusted(new X509Certificate[]{LEAF}, "RSA");
+    }
+
+    @Test
+    void failedExportWithoutCertificatesLeavesOnlyTheOtherSources() {
+        SystemTrustSslSocketFactory.Result result = SystemTrustSslSocketFactory.assemble(JVM_PLUS_WINDOWS_CA,
+                stores(Collections.<X509Certificate>emptyList(), Collections.<X509Certificate>emptyList(),
+                        "Windows certificate export failed: Cannot run program \"powershell.exe\""));
+
+        assertTrue(result.isJvmDefaultTrusted());
+        assertFalse(result.isWindowsCaStoresTrusted());
+        assertFalse(result.isFallbackToJvmDefault());
+        assertTrue(result.getDiagnostics().contains(
+                "Windows Root/Intermediate CA export: Windows certificate export failed: Cannot run program \"powershell.exe\""),
+                result.getDiagnostics().toString());
+        assertTrue(result.getDiagnostics().contains("Windows Root/Intermediate CA stores contributed no trust anchors."),
+                result.getDiagnostics().toString());
     }
 }

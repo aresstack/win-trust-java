@@ -32,10 +32,21 @@ final class PowerShellRunner {
     /** Upper bound for the captured stderr; only used for diagnostics. */
     private static final int MAX_STDERR_CHARS = 4000;
 
+    private final List<String> executable;
     private final String script;
     private final long timeoutSeconds;
 
     PowerShellRunner(String script, long timeoutSeconds) {
+        this(null, script, timeoutSeconds);
+    }
+
+    /**
+     * @param executable the command prefix to run instead of Windows PowerShell (tests substitute a
+     *                   small Java program here so the process handling runs on every platform);
+     *                   {@code null} means {@link #resolvePowerShellExecutable()}
+     */
+    PowerShellRunner(List<String> executable, String script, long timeoutSeconds) {
+        this.executable = executable == null ? null : new ArrayList<String>(executable);
         this.script = script;
         this.timeoutSeconds = timeoutSeconds;
     }
@@ -55,7 +66,11 @@ final class PowerShellRunner {
      */
     List<String> buildInlineCommand() {
         List<String> command = new ArrayList<String>();
-        command.add(resolvePowerShellExecutable());
+        if (executable == null) {
+            command.add(resolvePowerShellExecutable());
+        } else {
+            command.addAll(executable);
+        }
         command.add("-NoProfile");
         command.add("-NonInteractive");
         command.add("-Command");

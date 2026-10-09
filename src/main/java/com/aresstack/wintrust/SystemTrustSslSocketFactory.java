@@ -229,7 +229,18 @@ public final class SystemTrustSslSocketFactory {
     public static Result create(CertificateTrustConfiguration trust) {
         CertificateTrustConfiguration configuration = trust == null
                 ? CertificateTrustConfiguration.defaults() : trust;
+        WindowsCertificateStores.Result stores = configuration.isUseWindowsCaStores()
+                ? WindowsCertificateStores.loadRootAndIntermediateCertificates(configuration.getWindowsExportTimeoutSeconds())
+                : null;
+        return assemble(configuration, stores);
+    }
 
+    /**
+     * Assembles the result from the configuration and an already performed Windows store export
+     * ({@code null} when the Windows CA stores are disabled). Package-private so tests can exercise
+     * the Windows branches with known certificates on any platform.
+     */
+    static Result assemble(CertificateTrustConfiguration configuration, WindowsCertificateStores.Result stores) {
         List<X509TrustManager> delegates = new ArrayList<X509TrustManager>();
         List<String> diagnostics = new ArrayList<String>();
         boolean jvmDefault = false;
@@ -249,9 +260,7 @@ public final class SystemTrustSslSocketFactory {
             windowsRoot = addWindowsRootTrustManager(delegates, diagnostics);
         }
 
-        if (configuration.isUseWindowsCaStores()) {
-            WindowsCertificateStores.Result stores = WindowsCertificateStores
-                    .loadRootAndIntermediateCertificates(configuration.getWindowsExportTimeoutSeconds());
+        if (stores != null) {
             rootAnchorCount = stores.getRootCertificates().size();
             intermediateCount = stores.getIntermediateCertificates().size();
             if (stores.getError() != null) {

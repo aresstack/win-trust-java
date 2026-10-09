@@ -259,9 +259,11 @@ Two opt-in, environment-touching tests exist for Windows machines:
 ./mvnw verify -Dgpg.skip=true -Dwintrust.integration=true   # asserts the real inline PowerShell export works
 ```
 
-(`-Dgpg.skip=true` skips the artifact signing that only the release needs.) CI runs the unit tests
-on Linux and the real export, including the Constrained Language Mode variant, on a Windows runner
-for every pull request and every push to `main`.
+(`-Dgpg.skip=true` skips the artifact signing that only the release needs.) CI runs the suite on
+JDK 8 and JDK 21, on Linux and on a Windows runner where the real export, including the Constrained
+Language Mode variant, is executed, for every pull request and every push to `main`. The process
+handling itself (draining, exit codes, the stderr cap, the timeout) is covered on every platform by
+tests that run a small Java stand-in instead of `powershell.exe`.
 
 ## Releasing
 
@@ -270,8 +272,10 @@ Releases are published to Maven Central by
 or manually via *Run workflow* (`workflow_dispatch`, which tags the released version itself).
 It runs `./mvnw -B clean deploy` on JDK 8 with the `central-publishing-maven-plugin`, signed with
 GPG; credentials come from the `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`, `GPG_PRIVATE_KEY` and
-`GPG_PASSPHRASE` secrets. A pushed tag must match the `pom.xml` version, otherwise the run fails
-before anything is uploaded. The Maven Wrapper matters here: the runner's preinstalled Maven 3.10
+`GPG_PASSPHRASE` secrets. The deploy job only runs after a `verify` job has built and tested the
+exact revision on Linux and Windows (real export included); a pushed tag must match the `pom.xml`
+version and a manual run must not name an already-tagged version, otherwise the run fails before
+anything is uploaded. The Maven Wrapper matters here: the runner's preinstalled Maven 3.10
 leaves a `maven-metadata-local.xml` in the staging bundle that Central rejects, and the wrapper
 verifies the pinned Maven distribution against its SHA-256 before using it. `release.ps1` builds
 locally with the wrapper (unsigned, so no GPG setup is needed on the developer machine), creates

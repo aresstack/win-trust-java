@@ -165,9 +165,16 @@ public final class WindowsCertificateStores {
         if (!isWindows()) {
             return empty(null);
         }
+        return export(new PowerShellRunner(buildScript(), timeoutSeconds));
+    }
+
+    /**
+     * Runs the given (already configured) PowerShell invocation and turns its outcome into a
+     * {@link Result}. Package-private so tests can drive the failure paths with a stand-in process.
+     */
+    static Result export(PowerShellRunner runner) {
         try {
-            PowerShellRunner.Execution execution =
-                    new PowerShellRunner(buildScript(), timeoutSeconds).runInlineCommand();
+            PowerShellRunner.Execution execution = runner.runInlineCommand();
             Result parsed = parse(execution.getStandardOutput());
             return new Result(parsed.getRootCertificates(), parsed.getIntermediateCertificates(),
                     describeFailure(execution, parsed));
